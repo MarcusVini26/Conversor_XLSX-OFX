@@ -1,0 +1,21 @@
+# Build / PyInstaller
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Saídas geradas
+*.ofx
+
+# Dados sensíveis — extratos reais não devem ser versionados
+*.xls
+*.xlsx
+
+# Configs locais (editor / ferramentas)
+.vscode/
+.claude/

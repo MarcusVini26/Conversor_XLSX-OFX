@@ -13,6 +13,7 @@ Dependências: pip install pandas xlrd openpyxl
 import pandas as pd
 import sys
 import os
+import re
 import hashlib
 from datetime import datetime
 
@@ -42,9 +43,22 @@ def detectar_engine(caminho: str) -> str:
 
 
 def to_float(valor):
-    """Converte valor para float, retorna None se inválido."""
+    """Converte valor para float, retorna None se inválido/vazio.
+
+    Aceita número (float do pandas) e texto em formato BR ('3.756,20'),
+    incluindo símbolo de moeda ('R$ 100,00'). Retorna None — nunca NaN —
+    para valores ausentes (None/NaN/'nan') ou não numéricos.
+    """
+    if pd.isna(valor):
+        return None
+    s = str(valor).strip().replace("R$", "").replace("r$", "").strip()
+    if not s or s.lower() == "nan":
+        return None
+    # Formato BR: vírgula é o separador decimal; ponto é separador de milhar.
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
     try:
-        return float(str(valor).replace(",", "."))
+        return float(s)
     except (ValueError, TypeError):
         return None
 
@@ -54,6 +68,25 @@ def parse_data(data_str: str):
         return datetime.strptime(str(data_str).strip(), "%d/%m/%Y")
     except ValueError:
         return None
+
+
+def normalizar_data(valor) -> str:
+    """Normaliza um valor de data para o texto 'DD/MM/AAAA'.
+
+    Aceita tanto texto já nesse formato quanto datetime/Timestamp — caso o
+    Itaú exporte a coluna como tipo data do Excel (sem isso, todas as linhas
+    seriam descartadas como 'sem data' e o OFX sairia vazio). Retorna '' para
+    vazios, NaT/NaN ou formatos não reconhecidos.
+    """
+    if pd.isna(valor):
+        return ""
+    if not isinstance(valor, str) and hasattr(valor, "strftime"):
+        try:
+            return valor.strftime("%d/%m/%Y")
+        except (ValueError, AttributeError):
+            return ""
+    s = str(valor).strip()
+    return s if re.match(r"^\d{2}/\d{2}/\d{4}$", s) else ""
 
 
 def formatar_data_ofx(data_str: str) -> str:
@@ -95,8 +128,12 @@ def ler_xls(caminho: str, apenas_efetuados: bool = True) -> tuple:
 
     df = df.rename(columns=COLUNAS_ESPERADAS)
 
+    # Normaliza datas para texto 'DD/MM/AAAA' (suporta coluna exportada como
+    # tipo data do Excel, além de texto). Demais etapas assumem esse formato.
+    df["data"] = df["data"].apply(normalizar_data)
+
     # Remove linhas sem data válida (DD/MM/AAAA) — captura linha de Total e afins
-    mask_data_invalida = ~df["data"].astype(str).str.strip().str.match(r"^\d{2}/\d{2}/\d{4}$")
+    mask_data_invalida = ~df["data"].str.match(r"^\d{2}/\d{2}/\d{4}$")
     n_sem_data = int(mask_data_invalida.sum())
     df = df[~mask_data_invalida].copy()
 
@@ -109,9 +146,11 @@ def ler_xls(caminho: str, apenas_efetuados: bool = True) -> tuple:
     if apenas_efetuados:
         df = df[mask_efetuado].copy()
 
-    # Remove linhas com valor nulo ou não numérico, emitindo aviso por linha
-    df["_valor_float"] = df["valor"].apply(to_float)
-    mask_invalido = df["_valor_float"].isna()
+    # Remove linhas com valor nulo ou não numérico, emitindo aviso por linha.
+    # 'valor_num' (float já parseado) é mantido no df e reaproveitado depois,
+    # evitando reparsear o valor na geração do OFX e na soma do total.
+    df["valor_num"] = df["valor"].apply(to_float)
+    mask_invalido = df["valor_num"].isna()
     n_invalidos = int(mask_invalido.sum())
     if n_invalidos:
         for _, row in df[mask_invalido].iterrows():
@@ -119,7 +158,7 @@ def ler_xls(caminho: str, apenas_efetuados: bool = True) -> tuple:
                 f"  [AVISO] Linha ignorada — valor inválido: "
                 f"favorecido='{row.get('favorecido', '')}' | valor='{row.get('valor', '')}'"
             )
-    df = df[~mask_invalido].drop(columns=["_valor_float"])
+    df = df[~mask_invalido].copy()
 
     stats = {
         "total_lido": total_lido,
@@ -134,22 +173,54 @@ def ler_xls(caminho: str, apenas_efetuados: bool = True) -> tuple:
 
 # ─── Geração do OFX ──────────────────────────────────────────────────────────
 
-def gerar_fitid(row: pd.Series, idx: int) -> str:
-    """Gera FITID único por transação via hash — garante deduplicação no Omie."""
-    chave = f"{row['data']}|{row['favorecido']}|{row['valor']}|{idx}"
+def chave_transacao(row: pd.Series) -> str:
+    """Chave determinística de uma transação, independente de posição global.
+
+    Usa o valor já normalizado (valor_num) com 2 casas, para que o mesmo
+    lançamento gere a mesma chave mesmo se o XLS trouxer o valor formatado
+    de modos diferentes (ex.: 3756.2 vs '3.756,20').
+    """
+    valor = row.get("valor_num")
+    if valor is None:
+        valor = to_float(row.get("valor")) or 0.0
+    favorecido = str(row.get("favorecido", "")).strip()
+    referencia = str(row.get("referencia", "")).strip()
+    tipo = str(row.get("tipo", "")).strip()
+    return f"{row.get('data', '')}|{favorecido}|{referencia}|{tipo}|{valor:.2f}"
+
+
+def gerar_fitid(row: pd.Series, ocorrencia: int = 0) -> str:
+    """Gera FITID estável por transação via hash — garante deduplicação no Omie.
+
+    O desambiguador é a 'ocorrencia' (0,1,2…) entre transações de dados
+    idênticos dentro do arquivo, e NÃO o índice global da linha. Assim,
+    reexportar um período maior (com mais linhas antes) não altera o FITID
+    dos lançamentos repetidos — evitando duplicatas na reimportação.
+    """
+    chave = f"{chave_transacao(row)}|{ocorrencia}"
     return hashlib.md5(chave.encode()).hexdigest()[:16].upper()
+
+
+def escapar_sgml(texto: str) -> str:
+    """Escapa caracteres reservados do SGML/OFX em conteúdo de tag.
+
+    Sem isso, um favorecido como 'FULANO & CIA' geraria OFX malformado.
+    '&' é tratado primeiro para não reescapar as entidades recém-inseridas.
+    """
+    return texto.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def montar_memo(row: pd.Series) -> str:
     """Compõe descrição legível para o campo MEMO do OFX."""
-    partes = [str(row.get("favorecido", "")).strip()]
+    favorecido = str(row.get("favorecido", "")).strip()
+    partes = [favorecido] if favorecido.lower() != "nan" else [""]
     ref = str(row.get("referencia", "")).strip()
     tipo = str(row.get("tipo", "")).strip()
     if ref and ref != "-" and ref.lower() != "nan":
         partes.append(f"Ref: {ref}")
     if tipo and tipo.lower() != "nan":
         partes.append(f"({tipo})")
-    return " | ".join(partes)
+    return escapar_sgml(" | ".join(partes))
 
 
 def gerar_ofx(df: pd.DataFrame, agencia: str = "", conta: str = "") -> str:
@@ -206,10 +277,20 @@ def gerar_ofx(df: pd.DataFrame, agencia: str = "", conta: str = "") -> str:
         f"<DTEND>{ultima}",
     ]
 
-    for idx, row in df.iterrows():
-        valor_float = to_float(row.get("valor", 0)) or 0.0
+    # Ocorrência (0,1,2…) de cada transação entre dados idênticos no arquivo,
+    # usada como desambiguador estável do FITID (ver gerar_fitid).
+    if not df.empty:
+        chaves = df.apply(chave_transacao, axis=1)
+        ocorrencias = chaves.groupby(chaves).cumcount().tolist()
+    else:
+        ocorrencias = []
+
+    for pos, (_, row) in enumerate(df.iterrows()):
+        valor_float = row.get("valor_num")
+        if valor_float is None:
+            valor_float = to_float(row.get("valor", 0)) or 0.0
         valor_ofx = -abs(valor_float)
-        fitid = gerar_fitid(row, idx)
+        fitid = gerar_fitid(row, ocorrencias[pos])
 
         linhas += [
             "<STMTTRN>",
@@ -292,10 +373,11 @@ def main():
 
     ofx = gerar_ofx(df, agencia=meta["agencia"], conta=meta["conta"])
 
-    with open(caminho_saida, "w", encoding="latin-1", errors="replace") as f:
+    # cp1252 coincide com o CHARSET:1252 declarado no header do OFX.
+    with open(caminho_saida, "w", encoding="cp1252", errors="replace") as f:
         f.write(ofx)
 
-    total = df["valor"].apply(lambda v: to_float(v) or 0.0).sum()
+    total = df["valor_num"].sum()
     print(f"OFX gerado: {caminho_saida}")
     print(f"  Total em débitos: R$ {total:,.2f}")
 

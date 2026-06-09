@@ -17,7 +17,7 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-from xls_to_ofx import ler_xls, extrair_metadados, gerar_ofx, to_float
+from xls_to_ofx import ler_xls, extrair_metadados, gerar_ofx
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -121,6 +121,9 @@ class App(ctk.CTk):
 
     def _executar_conversao(self, caminho_entrada, caminho_saida, incluir_nao_efetuado):
         try:
+            if not os.path.isfile(caminho_entrada):
+                raise ValueError("Arquivo de entrada não encontrado. Selecione-o novamente.")
+
             meta = extrair_metadados(caminho_entrada)
             df, stats = ler_xls(caminho_entrada, apenas_efetuados=not incluir_nao_efetuado)
 
@@ -129,10 +132,11 @@ class App(ctk.CTk):
 
             ofx = gerar_ofx(df, agencia=meta["agencia"], conta=meta["conta"])
 
-            with open(caminho_saida, "w", encoding="latin-1", errors="replace") as f:
+            # cp1252 coincide com o CHARSET:1252 declarado no header do OFX.
+            with open(caminho_saida, "w", encoding="cp1252", errors="replace") as f:
                 f.write(ofx)
 
-            total = df["valor"].apply(lambda v: to_float(v) or 0.0).sum()
+            total = df["valor_num"].sum()
             msg = (
                 f"✅  {stats['incluidos']} lançamentos  ·  R$ {total:,.2f}\n"
                 f"Salvo em: {caminho_saida}"

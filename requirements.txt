@@ -1,0 +1,13 @@
+# Conversor SISPAG → OFX — dependências
+# Instalação: pip install -r requirements.txt
+
+# Leitura de planilhas
+pandas>=1.5.0
+xlrd>=2.0.1          # engine para .xls
+openpyxl>=3.0.0      # engine para .xlsx
+
+# Interface gráfica (gui.py)
+customtkinter>=5.2.0
+
+# Build do executável (opcional — apenas para gerar o .exe via build.bat)
+# pyinstaller>=6.0.0

@@ -6,7 +6,7 @@ echo   Build: Conversor SISPAG-OFX.exe
 echo ============================================
 echo.
 
-pyinstaller --onefile --windowed --name "Conversor SISPAG-OFX" --add-data "xls_to_ofx.py;." gui.py
+pyinstaller --onefile --windowed --name "Conversor SISPAG-OFX" --add-data "xls_to_ofx.py;." --add-data "ofx_reader.py;." --add-data "matching.py;." gui.py
 
 if %ERRORLEVEL% NEQ 0 (
     echo.

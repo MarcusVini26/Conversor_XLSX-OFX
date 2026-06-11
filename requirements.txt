@@ -9,5 +9,8 @@ openpyxl>=3.0.0      # engine para .xlsx
 # Interface gráfica (gui.py)
 customtkinter>=5.2.0
 
+# Testes
+pytest>=7.0.0
+
 # Build do executável (opcional — apenas para gerar o .exe via build.bat)
 # pyinstaller>=6.0.0

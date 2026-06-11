@@ -32,6 +32,16 @@ COLUNAS_ESPERADAS = {
     "status": "status",
 }
 
+# [VERIFICAR] Palavras-chave provisórias — confirmar com export real contendo tributos.
+TIPOS_TRIBUTO = ("tribut", "darf", "gnre", "gare", "gps", "fgts")
+
+
+def filtrar_tributos(df):
+    """Remove linhas cujo 'tipo' indica tributo. Retorna (df_limpo, n_removidas)."""
+    tipos = df["tipo"].fillna("").astype(str).str.lower()
+    mask_tributo = tipos.apply(lambda t: any(p in t for p in TIPOS_TRIBUTO))
+    return df[~mask_tributo].copy(), int(mask_tributo.sum())
+
 # ─── Utilitários ─────────────────────────────────────────────────────────────
 
 def detectar_engine(caminho: str) -> str:
@@ -146,6 +156,8 @@ def ler_xls(caminho: str, apenas_efetuados: bool = True) -> tuple:
     if apenas_efetuados:
         df = df[mask_efetuado].copy()
 
+    df, n_tributos = filtrar_tributos(df)
+
     # Remove linhas com valor nulo ou não numérico, emitindo aviso por linha.
     # 'valor_num' (float já parseado) é mantido no df e reaproveitado depois,
     # evitando reparsear o valor na geração do OFX e na soma do total.
@@ -165,6 +177,7 @@ def ler_xls(caminho: str, apenas_efetuados: bool = True) -> tuple:
         "nao_efetuados": n_nao_efetuados,
         "invalidos": n_invalidos,
         "sem_data": n_sem_data,
+        "tributos": n_tributos,
         "incluidos": len(df),
     }
 
